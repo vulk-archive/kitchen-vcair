@@ -22,6 +22,8 @@ require 'fog'
 require 'kitchen'
 require 'etc'
 require 'socket'
+require 'byebug'
+require 'pp'
 
 module Kitchen
   module Driver
@@ -34,35 +36,59 @@ module Kitchen
       default_config :port, '22'
       default_config :rackspace_region, 'dfw'
       default_config :wait_for, 600
-      default_config :no_ssh_tcp_check, false
+#      default_config :no_ssh_tcp_check, false
+      default_config :no_ssh_tcp_check, true
       default_config :no_ssh_tcp_check_sleep, 120
       default_config :rackconnect_wait, false
       default_config :servicenet, false
       default_config(:image_id) { |driver| driver.default_image }
       default_config(:server_name) { |driver| driver.default_name }
       default_config :networks, nil
+      default_config :vcair_show_progress, false
 
-      default_config :public_key_path do
-        [
-          File.expand_path('~/.ssh/id_rsa.pub'),
-          File.expand_path('~/.ssh/id_dsa.pub'),
-          File.expand_path('~/.ssh/identity.pub'),
-          File.expand_path('~/.ssh/id_ecdsa.pub')
-        ].find { |path| File.exist?(path) }
+      default_config :vcair_username do
+        ENV['VCAIR_USERNAME'] 
       end
 
-      default_config :rackspace_username do
-        ENV['RACKSPACE_USERNAME'] || ENV['OS_USERNAME']
+      default_config :vcair_password do
+        ENV['VCAIR_PASSWORD'] 
       end
 
-      default_config :rackspace_api_key do
-        ENV['RACKSPACE_API_KEY'] || ENV['OS_PASSWORD']
+      default_config :vcair_api_host do
+        ENV['VCAIR_API_HOST'] 
       end
 
-      required_config :rackspace_username
-      required_config :rackspace_api_key
+      default_config :vcair_org do
+        ENV['VCAIR_ORG'] 
+      end
+
+      default_config :vcloud_director_username do
+        ENV['VCAIR_USERNAME'] 
+      end
+
+      default_config :vcloud_director_password do
+        ENV['VCAIR_PASSWORD'] 
+      end
+
+      default_config :vcloud_director_api_host do
+        ENV['VCAIR_API_HOST'] 
+      end
+
+      default_config :vcloud_director_org do
+        ENV['VCAIR_ORG'] 
+      end
+
+      default_config :vcair_ssh_password do
+        ENV['VCAIR_SSH_PASSWORD'] 
+      end
+
+      required_config :vcair_username
+      required_config :vcair_password
+      required_config :vcair_api_host
+      required_config :vcair_org
       required_config :image_id
-      required_config :public_key_path
+      required_config :vcair_ssh_password
+      #required_config :public_key_path
 
       def initialize(config)
         super
@@ -72,11 +98,13 @@ module Kitchen
       def create(state)
         server = create_server
         state[:server_id] = server.id
-        info("Rackspace instance <#{state[:server_id]}> created.")
+        info("vCloud Air instance <#{state[:server_id]}> created.")
         server.wait_for { ready? }
         puts '(server ready)'
         rackconnect_check(server) if config[:rackconnect_wait]
         state[:hostname] = hostname(server)
+        state[:password] = config[:vcair_ssh_password]
+        byebug
         tcp_check(state)
       rescue Fog::Errors::Error, Excon::Errors::Error => ex
         raise ActionFailed, ex.message
@@ -84,7 +112,9 @@ module Kitchen
 
       def destroy(state)
         return if state[:server_id].nil?
-
+        # FIXME compute doesn't have servers
+        # TODO: See chef provisioner destory and state handling
+        return nil
         server = compute.servers.get(state[:server_id])
         server.destroy unless server.nil?
         info("Rackspace instance <#{state[:server_id]}> destroyed.")
@@ -93,7 +123,7 @@ module Kitchen
       end
 
       def default_image
-        images[instance.platform.name]
+        'CentOS64-64BIT'
       end
 
       # Generate what should be a unique server name up to 63 total chars
@@ -116,13 +146,39 @@ module Kitchen
       private
 
       def compute
-        server_def = { provider: 'Rackspace' }
-        opts = [:version, :rackspace_username, :rackspace_api_key,
-                :rackspace_region]
+        server_def = { provider: 'vclouddirector' } # fog driver for vcair
+        opts = [:version, :vcair_username, :vcair_password,
+                :vcair_api_host,
+                :vcair_org]
         opts.each do |opt|
-          server_def[opt] = config[opt]
+          # map vcair to vcloud_director fog naming
+          case opt
+          when :vcair_username
+            username = [config[opt], config[:vcair_org]].join('@') 
+            server_def[:vcloud_director_username] = username
+          when :vcair_password
+            server_def[:vcloud_director_password] = config[opt]
+          when :vcair_api_host
+            server_def[:vcloud_director_host] = config[opt]
+          when :vcair_api_version
+            server_def[:vcloud_director_api_version] = config[opt]
+          when :vcair_show_progress
+            server_def[:vcloud_director_show_progress] = config[opt]
+          else
+            server_def[opt] = config[opt]
+          end
         end
-        Fog::Compute.new(server_def)
+        begin
+          Fog::Compute.new(server_def)
+        rescue Excon::Errors::Unauthorized => e
+          error_message = "Connection failure, please check your username and password."
+          Chef::Log.error(error_message)
+          raise "#{e.message}. #{error_message}"
+        rescue Excon::Errors::SocketError => e
+          error_message = "Connection failure, please check your authentication URL."
+          Chef::Log.error(error_message)
+          raise "#{e.message}. #{error_message}"
+        end
       end
 
       def create_server
@@ -130,9 +186,47 @@ module Kitchen
         [:image_id, :flavor_id, :public_key_path].each do |opt|
           server_def[opt] = config[opt]
         end
-        # see @note on bootstrap def about rackconnect
-        server_def[:no_passwd_lock] = true if config[:rackconnect_wait]
-        compute.servers.bootstrap(server_def)
+
+
+        server_def[:image_name] = config[:image_id] || config[:image_name]
+        #server_def[:no_passwd_lock] = true if config[:rackconnect_wait]
+        clean_bootstrap_options = Marshal.load(Marshal.dump(server_def)) # Prevent destructive operations on bootstrap_options.
+        bootstrap_options = clean_bootstrap_options
+        bootstrap_options[:ssh_password] = config[:vcair_ssh_password]
+        bootstrap_options[:name] = default_name # .gsub(/\W/,"-").slice(0..14)
+
+        begin
+          instantiate(clean_bootstrap_options)
+          vapp = vdc.vapps.get_by_name(bootstrap_options[:name])
+          vm = vapp.vms.find {|v| v.vapp_name == bootstrap_options[:name]}
+          update_customization(clean_bootstrap_options, vm)
+          if clean_bootstrap_options[:cpus]
+            vm.cpu = clean_bootstrap_options[:cpus]
+          end
+          if clean_bootstrap_options[:memory]
+            vm.memory = bootstrap_options[:memory]
+          end
+          update_network(clean_bootstrap_options, vapp, vm)
+
+        rescue Excon::Errors::BadRequest => e
+          response = Chef::JSONCompat.from_json(e.response.body)
+          if response['badRequest']['code'] == 400
+            message = "Bad request (400): #{response['badRequest']['message']}"
+              Chef::Log.error(message)
+          else
+            message = "Unknown server error (#{response['badRequest']['code']}): #{response['badRequest']['message']}"
+              Chef::Log.error(message)
+          end
+          raise message
+        rescue Fog::Errors::Error => e
+          raise e.message
+        end
+
+        pp "bootstrap happens here normally"
+        #compute.servers.bootstrap(server_def)
+        vm.power_on
+        yield vm if block_given?
+        vm
       end
 
       def images
@@ -145,6 +239,7 @@ module Kitchen
       def tcp_check(state)
         # allow driver config to bypass SSH tcp check -- because
         # it doesn't respect ssh_config values that might be required
+        # FIXME: waid_for_sshd doesn't exist
         wait_for_sshd(state[:hostname]) unless config[:no_ssh_tcp_check]
         sleep(config[:no_ssh_tcp_check_sleep]) if config[:no_ssh_tcp_check]
         puts '(ssh ready)'
@@ -158,11 +253,8 @@ module Kitchen
       end
 
       def hostname(server)
-        if config[:servicenet] == false
-          server.public_ip_address
-        else
-          server.private_ip_address
-        end
+        # we don't trust dns yet
+        server.ip_address
       end
 
       def networks
@@ -171,6 +263,135 @@ module Kitchen
           11111111-1111-1111-1111-111111111111
         )
         config[:networks] ? base_nets + config[:networks] : nil
+      end
+
+
+      def org
+        @org ||= compute.organizations.get_by_name(config[:vcair_org])
+      end
+
+      def vdc
+        if config[:vcair_vdc]
+          @vdc ||= org.vdcs.get_by_name(config[:vcair_vdc])
+        else
+          @vdc ||= org.vdcs.first
+        end
+      end
+
+
+      def net
+        if config[:vcair_net]
+          @net ||= org.networks.get_by_name(config[:vcair_net])
+        else
+          # Grab first non-isolated (bridged, natRouted) network
+          @net ||= org.networks.find { |n| n if !n.fence_mode.match("isolated") }
+        end
+      end
+
+      def template(bootstrap_options)
+        # TODO: find by catalog item ID and/or NAME
+        # TODO: add option to search just public and/or private catalogs
+        tmpl=org.catalogs.map do |cat|
+          #cat.catalog_items.get_by_name(config(:image_id))
+          cat.catalog_items.get_by_name(bootstrap_options[:image_name])
+        end.compact.first
+        #byebug
+        tmpl
+      end
+
+      def instantiate(bootstrap_options)
+        begin
+          #byebug
+          #node_name = config_value(:chef_node_name)
+          #node_name = bootstrap_options[:name]
+          node_name = bootstrap_options[:name]
+          template(bootstrap_options).instantiate(
+            node_name,
+            vdc_id: vdc.id,
+            network_id: net.id,
+            description: "id:#{node_name}")
+          #rescue CloudExceptions::ServerCreateError => e
+        rescue => e
+          raise e
+        end
+      end
+
+      def update_customization(bootstrap_options, server)
+        ## Initialization before first power on.
+        c=server.customization
+
+        if bootstrap_options[:customization_script]
+          c.script = open(bootstrap_options[:customization_script]).read
+        end
+
+        # TODO: check machine type and pick accordingly for Chef provisioning
+        # password = case config_value(:bootstrap_protocol)
+        #            when 'winrm'
+        #              config_value(:winrm_password)
+        #            when 'ssh'
+        #              config_value(:ssh_password)
+        #            end
+
+        password = bootstrap_options[:ssh_password]
+        byebug
+        if password
+          c.admin_password =  password 
+          c.admin_password_auto = false
+          c.reset_password_required = false
+        else
+          # Password will be autogenerated
+          c.admin_password_auto=true
+          # API will force password resets when auto is enabled
+          c.reset_password_required = true
+        end
+
+        # DNS and Windows want AlphaNumeric and dashes for hostnames
+        # Windows can only handle 15 character hostnames
+        # TODO: only change name for Windows!
+        c.computer_name = bootstrap_options[:name] # .gsub(/\W/,"-").slice(0..14)
+        c.enabled = true
+        # FIXME, names ending in - don't work either
+        # c.computer_name = bootstrap_options[:name].gsub(/-$/,"").slice(0..14)
+        c.save
+      end
+
+      ## Vcair
+      ## TODO: make work with floating_ip
+      ## NOTE: current vcair networking changes require VM to be powered off
+      def update_network(bootstrap_options, vapp, vm)
+        ## TODO: allow user to specify network to connect to (see above net used)
+        # Define network connection for vm based on existing routed network
+
+        # Vcair inlining vapp() and vm()
+        #vapp = vdc.vapps.get_by_name(bootstrap_options[:name])
+        #vm = vapp.vms.find {|v| v.vapp_name == bootstrap_options[:name]}
+        nc = vapp.network_config.find { |n| n if n[:networkName].match(net.name) }
+        networks_config = [nc]
+        section = {PrimaryNetworkConnectionIndex: 0}
+        section[:NetworkConnection] = networks_config.compact.each_with_index.map do |network, i|
+          connection = {
+            network: network[:networkName],
+            needsCustomization: true,
+            NetworkConnectionIndex: i,
+            IsConnected: true
+          }
+          ip_address      = network[:ip_address]
+          ## TODO: support config options for allocation mode
+          #allocation_mode = network[:allocation_mode]
+          #allocation_mode = 'manual' if ip_address
+          #allocation_mode = 'dhcp' unless %w{dhcp manual pool}.include?(allocation_mode)
+          #allocation_mode = 'POOL'
+          #connection[:Dns1] = dns1 if dns1
+          allocation_mode = 'pool'
+          connection[:IpAddressAllocationMode] = allocation_mode.upcase
+          connection[:IpAddress] = ip_address if ip_address
+          connection
+        end
+
+        ## attach the network to the vm
+        nc_task = compute.put_network_connection_system_section_vapp(
+          vm.id,section).body
+          compute.process_task(nc_task)
       end
     end
   end
