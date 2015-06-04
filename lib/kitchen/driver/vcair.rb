@@ -34,12 +34,10 @@ module Kitchen
       default_config :flavor_id, 'performance1-1'
       default_config :username, 'root'
       default_config :port, '22'
-      default_config :rackspace_region, 'dfw'
       default_config :wait_for, 600
 #      default_config :no_ssh_tcp_check, false
       default_config :no_ssh_tcp_check, true
       default_config :no_ssh_tcp_check_sleep, 120
-      default_config :rackconnect_wait, false
       default_config :servicenet, false
       default_config(:image_id) { |driver| driver.default_image }
       default_config(:server_name) { |driver| driver.default_name }
@@ -62,21 +60,21 @@ module Kitchen
         ENV['VCAIR_ORG'] 
       end
 
-      default_config :vcloud_director_username do
-        ENV['VCAIR_USERNAME'] 
-      end
+      # default_config :vcloud_director_username do
+      #   config[:vcair_username] || ENV['VCAIR_USERNAME'] 
+      # end
+      #
+      # default_config :vcloud_director_password do
+      #   config[:vcair_password] || ENV['VCAIR_PASSWORD'] 
+      # end
 
-      default_config :vcloud_director_password do
-        ENV['VCAIR_PASSWORD'] 
-      end
+      # default_config :vcloud_director_api_host do
+      #   config[:vcair_api_host] || ENV['VCAIR_API_HOST'] 
+      # end
 
-      default_config :vcloud_director_api_host do
-        ENV['VCAIR_API_HOST'] 
-      end
-
-      default_config :vcloud_director_org do
-        ENV['VCAIR_ORG'] 
-      end
+      # default_config :vcloud_director_org do
+      #   config[:vcair_org] || ENV['VCAIR_ORG'] 
+      # end
 
       default_config :vcair_ssh_password do
         ENV['VCAIR_SSH_PASSWORD'] 
@@ -93,6 +91,12 @@ module Kitchen
       def initialize(config)
         super
         Fog.timeout = config[:wait_for].to_i
+
+        # NOTE: this is for compatibility with fog
+        config[:vcloud_director_org] = config[:vcair_org] || ENV['VCAIR_ORG'] 
+        config[:vcloud_director_api_host] = config[:vcair_api_host] || ENV['VCAIR_API_HOST'] 
+        config[:vcloud_director_username] = config[:vcair_username] || ENV['VCAIR_USERNAME'] 
+        config[:vcloud_director_password] = config[:vcair_password] || ENV['VCAIR_PASSWORD'] 
       end
 
       def create(state)
@@ -104,20 +108,50 @@ module Kitchen
         rackconnect_check(server) if config[:rackconnect_wait]
         state[:hostname] = hostname(server)
         state[:password] = config[:vcair_ssh_password]
-        byebug
         tcp_check(state)
       rescue Fog::Errors::Error, Excon::Errors::Error => ex
         raise ActionFailed, ex.message
       end
 
+
+          def destroy_machine(action_handler, machine_spec, machine_options)
+            server = server_for(machine_spec)
+            if server && server.status != 'archive' # TODO: does Vcair do archive?
+              action_handler.perform_action "destroy machine #{machine_spec.name} (#{machine_spec.location['server_id']} at #{driver_url})" do
+                #NOTE: currently doing 1 vm for 1 vapp
+                vapp = vdc.vapps.get_by_name(machine_spec.name)
+                if vapp
+                  vapp.power_off
+                  vapp.undeploy
+                  vapp.destroy
+                else
+                  Chef::Log.warn "No VApp named '#{server_name}' was found."
+                end
+              end
+            end
+            machine_spec.location = nil
+            strategy = convergence_strategy_for(machine_spec, machine_options)
+            strategy.cleanup_convergence(action_handler, machine_spec)
+          end
+
       def destroy(state)
         return if state[:server_id].nil?
-        # FIXME compute doesn't have servers
-        # TODO: See chef provisioner destory and state handling
-        return nil
-        server = compute.servers.get(state[:server_id])
-        server.destroy unless server.nil?
-        info("Rackspace instance <#{state[:server_id]}> destroyed.")
+        begin
+          vapp = vdc.vapps.get(state[:server_id])
+        rescue Fog::Compute::VcloudDirector::Forbidden => e
+          vapp = nil
+        rescue Exception => e
+          info("Rackspace instance <#{state[:server_id]}> not found!")
+          byebug
+        end
+        if vapp
+          vapp.power_off
+          vapp.undeploy
+          vapp.destroy
+          info("Rackspace instance <#{state[:server_id]}> destroyed.")
+        else
+          warn("VApp <#{state[:server_id]}> not found!")
+        end
         state.delete(:server_id)
         state.delete(:hostname)
       end
@@ -147,9 +181,7 @@ module Kitchen
 
       def compute
         server_def = { provider: 'vclouddirector' } # fog driver for vcair
-        opts = [:version, :vcair_username, :vcair_password,
-                :vcair_api_host,
-                :vcair_org]
+        opts = [:vcair_username, :vcair_password, :vcair_api_host]
         opts.each do |opt|
           # map vcair to vcloud_director fog naming
           case opt
@@ -222,8 +254,6 @@ module Kitchen
           raise e.message
         end
 
-        pp "bootstrap happens here normally"
-        #compute.servers.bootstrap(server_def)
         vm.power_on
         yield vm if block_given?
         vm
@@ -333,7 +363,7 @@ module Kitchen
         #            end
 
         password = bootstrap_options[:ssh_password]
-        byebug
+        # byebug
         if password
           c.admin_password =  password 
           c.admin_password_auto = false
