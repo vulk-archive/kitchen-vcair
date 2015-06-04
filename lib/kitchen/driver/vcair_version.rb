@@ -22,6 +22,6 @@ module Kitchen
   #
   # @author Chris McClimans and Taylor Carpenter <wolfpack+c+t@vulk.co>
   module Driver
-    VCAIR_VERSION = '0.1.0'
+    VCAIR_VERSION = '0.1.1'
   end
 end

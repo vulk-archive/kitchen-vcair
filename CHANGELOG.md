@@ -1,4 +1,8 @@
-# ?.?.? / ????-??-??
+# 0.1.1 / 2015-06-04
+* Destroy working
+* Password updates
+* Documentation updates
+* Cleanup and refactoring
 
 # 0.1.0 / 2015-05-xx
 
