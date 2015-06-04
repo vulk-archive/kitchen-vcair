@@ -105,7 +105,6 @@ module Kitchen
         info("vCloud Air instance <#{state[:server_id]}> created.")
         server.wait_for { ready? }
         puts '(server ready)'
-        rackconnect_check(server) if config[:rackconnect_wait]
         state[:hostname] = hostname(server)
         state[:password] = config[:vcair_ssh_password]
         tcp_check(state)
@@ -141,14 +140,14 @@ module Kitchen
         rescue Fog::Compute::VcloudDirector::Forbidden => e
           vapp = nil
         rescue Exception => e
-          info("Rackspace instance <#{state[:server_id]}> not found!")
+          info("VApp <#{state[:server_id]}> not found!")
           byebug
         end
         if vapp
           vapp.power_off
           vapp.undeploy
           vapp.destroy
-          info("Rackspace instance <#{state[:server_id]}> destroyed.")
+          info("VApp <#{state[:server_id]}> destroyed.")
         else
           warn("VApp <#{state[:server_id]}> not found!")
         end
@@ -221,7 +220,6 @@ module Kitchen
 
 
         server_def[:image_name] = config[:image_id] || config[:image_name]
-        #server_def[:no_passwd_lock] = true if config[:rackconnect_wait]
         clean_bootstrap_options = Marshal.load(Marshal.dump(server_def)) # Prevent destructive operations on bootstrap_options.
         bootstrap_options = clean_bootstrap_options
         bootstrap_options[:ssh_password] = config[:vcair_ssh_password]
@@ -273,13 +271,6 @@ module Kitchen
         wait_for_sshd(state[:hostname]) unless config[:no_ssh_tcp_check]
         sleep(config[:no_ssh_tcp_check_sleep]) if config[:no_ssh_tcp_check]
         puts '(ssh ready)'
-      end
-
-      def rackconnect_check(server)
-        server.wait_for \
-          { metadata.all['rackconnect_automation_status'] == 'DEPLOYED' }
-        puts '(rackconnect automation complete)'
-        server.update # refresh accessIPv4 with new IP
       end
 
       def hostname(server)
