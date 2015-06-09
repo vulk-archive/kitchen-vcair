@@ -1,4 +1,4 @@
-# Walkthru of kitchen-vcair
+# Video Walkthru of kitchen-vcair
 
 * [github.com/vulk/kitchen-vcair](https://www.youtube.com/watch?v=5srDko69XJ0&t=03)
 * [vchs.vmware.com](https://www.youtube.com/watch?v=5srDko69XJ0&t=15)
