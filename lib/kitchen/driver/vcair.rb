@@ -76,8 +76,8 @@ module Kitchen
       #   config[:vcair_org] || ENV['VCAIR_ORG'] 
       # end
 
-      default_config :vcair_ssh_password do
-        ENV['VCAIR_SSH_PASSWORD'] 
+      default_config :vcair_vm_password do
+        ENV['VCAIR_VM_PASSWORD'] 
       end
 
       required_config :vcair_username
@@ -85,7 +85,7 @@ module Kitchen
       required_config :vcair_api_host
       required_config :vcair_org
       required_config :image_id
-      required_config :vcair_ssh_password
+      required_config :vcair_vm_password
       #required_config :public_key_path
 
       def initialize(config)
@@ -106,32 +106,35 @@ module Kitchen
         server.wait_for { ready? }
         puts '(server ready)'
         state[:hostname] = hostname(server)
-        state[:password] = config[:vcair_ssh_password]
-        tcp_check(state)
+        state[:password] = config[:vcair_vm_password]
+        # would be better to do a tcp_check here
+        sleep(500)
+        # tcp_check(state)
       rescue Fog::Errors::Error, Excon::Errors::Error => ex
         raise ActionFailed, ex.message
       end
 
-
-          def destroy_machine(action_handler, machine_spec, machine_options)
-            server = server_for(machine_spec)
-            if server && server.status != 'archive' # TODO: does Vcair do archive?
-              action_handler.perform_action "destroy machine #{machine_spec.name} (#{machine_spec.location['server_id']} at #{driver_url})" do
-                #NOTE: currently doing 1 vm for 1 vapp
-                vapp = vdc.vapps.get_by_name(machine_spec.name)
-                if vapp
-                  vapp.power_off
-                  vapp.undeploy
-                  vapp.destroy
-                else
-                  Chef::Log.warn "No VApp named '#{server_name}' was found."
-                end
-              end
+      
+      def destroy_machine(action_handler, machine_spec, machine_options)
+        server = server_for(machine_spec)
+        byebug
+        if server && server.status != 'archive' # TODO: does Vcair do archive?
+          action_handler.perform_action "destroy machine #{machine_spec.name} (#{machine_spec.location['server_id']} at #{driver_url})" do
+            #NOTE: currently doing 1 vm for 1 vapp
+            vapp = vdc.vapps.get_by_name(machine_spec.name)
+            if vapp
+              vapp.power_off
+              vapp.undeploy
+              vapp.destroy
+            else
+              Chef::Log.warn "No VApp named '#{server_name}' was found."
             end
-            machine_spec.location = nil
-            strategy = convergence_strategy_for(machine_spec, machine_options)
-            strategy.cleanup_convergence(action_handler, machine_spec)
           end
+        end
+        machine_spec.location = nil
+        strategy = convergence_strategy_for(machine_spec, machine_options)
+        strategy.cleanup_convergence(action_handler, machine_spec)
+      end
 
       def destroy(state)
         return if state[:server_id].nil?
@@ -141,7 +144,6 @@ module Kitchen
           vapp = nil
         rescue Exception => e
           info("VApp <#{state[:server_id]}> not found!")
-          byebug
         end
         if vapp
           vapp.power_off
@@ -160,19 +162,20 @@ module Kitchen
       end
 
       # Generate what should be a unique server name up to 63 total chars
-      # Base name:    15
-      # Username:     15
-      # Hostname:     23
-      # Random string: 7
+      # Base name:    3
+      # Username:     3
+      # Hostname:     3
+      # Random string: 3
       # Separators:    3
       # ================
-      # Total:        63
+      # Total:        15 (3x5)
+      # FIXME: Windows only supports 15 character hostnames
       def default_name
         [
-          instance.name.gsub(/\W/, '')[0..14],
-          (Etc.getlogin || 'nologin').gsub(/\W/, '')[0..14],
-          Socket.gethostname.gsub(/\W/, '')[0..22],
-          Array.new(7) { rand(36).to_s(36) }.join
+          instance.name.gsub(/\W/, '')[0..2],
+          (Etc.getlogin || 'nologin').gsub(/\W/, '')[0..2],
+          Socket.gethostname.gsub(/\W/, '')[0..2],
+          Array.new(3) { rand(36).to_s(36) }.join
         ].join('-')
       end
 
@@ -214,24 +217,31 @@ module Kitchen
 
       def create_server
         server_def = { name: config[:server_name], networks: networks }
-        [:image_id, :flavor_id, :public_key_path].each do |opt|
+        [:image_id,
+         :flavor_id,
+         :public_key_path,
+         :customization_script,
+         :vcair_vm_password
+        ].each do |opt|
           server_def[opt] = config[opt]
         end
 
 
         server_def[:image_name] = config[:image_id] || config[:image_name]
-        clean_bootstrap_options = Marshal.load(Marshal.dump(server_def)) # Prevent destructive operations on bootstrap_options.
+        # Prevent destructive operations on bootstrap_options
+        clean_bootstrap_options = Marshal.load(Marshal.dump(server_def)) 
         bootstrap_options = clean_bootstrap_options
-        bootstrap_options[:ssh_password] = config[:vcair_ssh_password]
-        bootstrap_options[:name] = default_name # .gsub(/\W/,"-").slice(0..14)
+        bootstrap_options[:name] = default_name.gsub(/\W/,"-").slice(0..14)
 
         begin
+          #byebug
           instantiate(clean_bootstrap_options)
           vapp = vdc.vapps.get_by_name(bootstrap_options[:name])
           vm = vapp.vms.find {|v| v.vapp_name == bootstrap_options[:name]}
+
           update_customization(clean_bootstrap_options, vm)
           if clean_bootstrap_options[:cpus]
-            vm.cpu = clean_bootstrap_options[:cpus]
+            vm.cpu = bootstrap_options[:cpus]
           end
           if clean_bootstrap_options[:memory]
             vm.memory = bootstrap_options[:memory]
@@ -264,14 +274,33 @@ module Kitchen
         end
       end
 
-      def tcp_check(state)
-        # allow driver config to bypass SSH tcp check -- because
-        # it doesn't respect ssh_config values that might be required
-        # FIXME: waid_for_sshd doesn't exist
-        wait_for_sshd(state[:hostname]) unless config[:no_ssh_tcp_check]
-        sleep(config[:no_ssh_tcp_check_sleep]) if config[:no_ssh_tcp_check]
-        puts '(ssh ready)'
-      end
+      # Blocks until a TCP socket is available where a remote SSH server
+      # should be listening.
+      #
+      # @param hostname [String] remote SSH server host
+      # @param username [String] SSH username (default: `nil`)
+      # @param options [Hash] configuration hash (default: `{}`)
+      # @api private
+      # def wait_for_sshd(hostname, username = nil, options = {})
+      #   pseudo_state = { :hostname => hostname }
+      #   pseudo_state[:username] = username if username
+      #   pseudo_state.merge!(options)
+
+      #   instance.transport.connection(backcompat_merged_state(pseudo_state)).
+      #     wait_until_ready
+      # end
+
+
+      # def tcp_check(state)
+      #   # allow driver config to bypass SSH tcp check -- because
+      #   # it doesn't respect ssh_config values that might be required
+      #   # FIXME: wait_for_sshd doesn't exist
+      #   # we need this for winrm
+      #   byebug
+      #   wait_for_sshd(state[:hostname]) unless config[:no_ssh_tcp_check]
+      #   sleep(config[:no_ssh_tcp_check_sleep]) if config[:no_ssh_tcp_check]
+      #   puts '(ssh ready)'
+      # end
 
       def hostname(server)
         # we don't trust dns yet
@@ -339,41 +368,33 @@ module Kitchen
 
       def update_customization(bootstrap_options, server)
         ## Initialization before first power on.
-        c=server.customization
+        custom=server.customization
 
         if bootstrap_options[:customization_script]
-          c.script = open(bootstrap_options[:customization_script]).read
+          custom.script = open(bootstrap_options[:customization_script]).read
         end
 
-        # TODO: check machine type and pick accordingly for Chef provisioning
-        # password = case config_value(:bootstrap_protocol)
-        #            when 'winrm'
-        #              config_value(:winrm_password)
-        #            when 'ssh'
-        #              config_value(:ssh_password)
-        #            end
-
-        password = bootstrap_options[:ssh_password]
-        # byebug
-        if password
-          c.admin_password =  password 
-          c.admin_password_auto = false
-          c.reset_password_required = false
+        if bootstrap_options[:vcair_vm_password]
+          custom.admin_password =  bootstrap_options[:vcair_vm_password]
+          custom.admin_password_auto = false
+          custom.reset_password_required = false
         else
           # Password will be autogenerated
-          c.admin_password_auto=true
+          custom.admin_password_auto=true
           # API will force password resets when auto is enabled
-          c.reset_password_required = true
+          # Which is frustrating, because it means
+          # we can't login over winrm to change it
+          custom.reset_password_required = true
         end
 
         # DNS and Windows want AlphaNumeric and dashes for hostnames
         # Windows can only handle 15 character hostnames
         # TODO: only change name for Windows!
-        c.computer_name = bootstrap_options[:name] # .gsub(/\W/,"-").slice(0..14)
-        c.enabled = true
+        custom.computer_name = bootstrap_options[:name].gsub(/\W/,"-").slice(0..14)
         # FIXME, names ending in - don't work either
-        # c.computer_name = bootstrap_options[:name].gsub(/-$/,"").slice(0..14)
-        c.save
+        custom.computer_name = custom.computer_name.gsub(/-$/,"").slice(0..14)
+        custom.enabled = true
+        custom.save
       end
 
       ## Vcair
