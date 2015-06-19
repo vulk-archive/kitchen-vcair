@@ -22,7 +22,6 @@ require 'fog'
 require 'kitchen'
 require 'etc'
 require 'socket'
-require 'byebug'
 require 'pp'
 
 module Kitchen
@@ -117,7 +116,6 @@ module Kitchen
       
       def destroy_machine(action_handler, machine_spec, machine_options)
         server = server_for(machine_spec)
-        byebug
         if server && server.status != 'archive' # TODO: does Vcair do archive?
           action_handler.perform_action "destroy machine #{machine_spec.name} (#{machine_spec.location['server_id']} at #{driver_url})" do
             #NOTE: currently doing 1 vm for 1 vapp
@@ -234,7 +232,6 @@ module Kitchen
         bootstrap_options[:name] = default_name.gsub(/\W/,"-").slice(0..14)
 
         begin
-          #byebug
           instantiate(clean_bootstrap_options)
           vapp = vdc.vapps.get_by_name(bootstrap_options[:name])
           vm = vapp.vms.find {|v| v.vapp_name == bootstrap_options[:name]}
@@ -296,7 +293,6 @@ module Kitchen
       #   # it doesn't respect ssh_config values that might be required
       #   # FIXME: wait_for_sshd doesn't exist
       #   # we need this for winrm
-      #   byebug
       #   wait_for_sshd(state[:hostname]) unless config[:no_ssh_tcp_check]
       #   sleep(config[:no_ssh_tcp_check_sleep]) if config[:no_ssh_tcp_check]
       #   puts '(ssh ready)'
@@ -345,13 +341,11 @@ module Kitchen
           #cat.catalog_items.get_by_name(config(:image_id))
           cat.catalog_items.get_by_name(bootstrap_options[:image_name])
         end.compact.first
-        #byebug
         tmpl
       end
 
       def instantiate(bootstrap_options)
         begin
-          #byebug
           #node_name = config_value(:chef_node_name)
           #node_name = bootstrap_options[:name]
           node_name = bootstrap_options[:name]
