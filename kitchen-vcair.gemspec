@@ -22,6 +22,7 @@ Gem::Specification.new do |spec|
   spec.required_ruby_version = '>= 1.9.3'
 
   spec.add_dependency 'test-kitchen', '~> 1.1'
+  spec.add_dependency 'pester'
   spec.add_dependency 'fog', '~> 1.18'
 
   spec.add_development_dependency 'bundler', '~> 1.0'
