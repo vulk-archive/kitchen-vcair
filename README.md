@@ -49,6 +49,18 @@ specified platform. Additional, optional overrides can be provided:
     no_ssh_tcp_check: [DEFAULTS TO false, SKIPS TCP CHECK WHEN true]
     no_ssh_tcp_check_sleep: [NUM OF SECONDS TO SLEEP IF no_ssh_tcp_check IS SET]
 
+If targeting windows, be sure to add ```transport``` and ```verifier`` options:
+
+    transport:
+      name: winrm
+      connection_retries: 15
+      connection_retry_sleep: 15
+      max_wait_until_ready: 600
+      username: 'administrator'
+      password: 'Password1'
+    verifier:
+      name: pester
+
 You also have the option of providing some configs via environment variables:
 
     export VCAIR_API_HOST='API_HOST.vchs.vmware.com'
@@ -150,7 +162,7 @@ echo %DATE% %TIME% > C:\vm-is-ready
 Feature Requests
 ----------------
 
-##### Windows and non CentOS64-64BIT image support
+##### Non CentOS64-64BIT image support
 
 CentoOS64-64BIT is the only image that allowed setting the password
 CentOS and Ubuntu failed to set the password correctly
